@@ -12,7 +12,7 @@ This system translates natural language questions into SQL queries, executes the
 The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer  
-                                 └─── retry (on error) ─────┘
+.                                └─── retry (on error) ─────┘
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.  
 This makes the system modular, traceable, and easy to debug.
@@ -125,12 +125,10 @@ For each question, we show: Input → Generated SQL → Final Answer.
 
 ### Example 1 – Multi-step Query (Join + Aggregation)
 
-Input:
-
+**Input:**  
 Which teacher taught CS101 in Spring 2026 and what was the average grade?
 
-Generated SQL(example):
-
+**Generated SQL(example):**  
 SELECT t.name AS teacher_name, AVG(e.grade) AS average_grade  
 FROM course_offerings co  
 JOIN courses c ON co.course_id = c.course_id  
@@ -142,18 +140,17 @@ WHERE c.code = 'CS101'
 GROUP BY t.name  
 LIMIT 50;
 
-Output:
-
+**Output:**  
 Dr. Alice Nguyen taught CS101 in Spring 2026, and the average grade was 90.5.
 
 ---
 
 ### Example 2 – Join Query
 
-Input:
-
+**Input:**  
 Who taught CS101 in Spring 2026?  
-Generated SQL(example):  
+
+**Generated SQL(example):**    
 SELECT t.name  
 FROM course_offerings co  
 JOIN courses c ON co.course_id = c.course_id  
@@ -163,20 +160,17 @@ WHERE c.code = 'CS101'
   AND co.year = 2026  
 LIMIT 50;
 
-Output:
-
+**Output:**  
 Dr. Alice Nguyen taught CS101 in Spring 2026.
 
 ---
 
 ### Example 3 – Aggregation
 
-Input:
-
+**Input:**  
 What is the average grade in CS101 Spring 2026?
 
-Generated SQL(example):  
-
+**Generated SQL(example):**  
 SELECT AVG(e.grade) AS average_grade  
 FROM enrollments e  
 JOIN course_offerings co ON e.offering_id = co.offering_id  
@@ -186,8 +180,7 @@ WHERE c.code = 'CS101'
   AND co.year = 2026  
 LIMIT 50;
 
-Output:
-
+**Output:**
 The average grade in CS101 for Spring 2026 is 90.5.
 
 ---
