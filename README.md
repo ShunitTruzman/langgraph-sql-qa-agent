@@ -29,7 +29,7 @@ This makes the system modular, traceable, and easy to debug.
 - answer – Produces a final natural language response  
 
 The system supports:
--🔁 Retry loop on SQL execution error  
+-🔁 Retry loop on SQL execution error   
 -❓ Clarification path for ambiguous questions  
 
 ---
