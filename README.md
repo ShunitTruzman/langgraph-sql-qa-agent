@@ -12,7 +12,7 @@ This system translates natural language questions into SQL queries, executes the
 The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer  
-.....................................................................└─── retry (on error) ─────┘..........................................
+.....................................................................└─── retry (on error) ─────┘........................................................................
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.  
 This makes the system modular, traceable, and easy to debug.
@@ -28,7 +28,7 @@ This makes the system modular, traceable, and easy to debug.
 - exec_sql – Executes SQL safely  
 - answer – Produces a final natural language response  
 
-The system supports:
+The system supports:  
 -🔁 Retry loop on SQL execution error   
 -❓ Clarification path for ambiguous questions  
 
