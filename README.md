@@ -12,7 +12,7 @@ This system translates natural language questions into SQL queries, executes the
 The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer
-                         └──────────── retry (on error) ────────────┘
+..................................└──────────── retry (on error) ────────────┘..............
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.
 This makes the system modular, traceable, and easy to debug.
@@ -56,11 +56,11 @@ The schema supports:
 
 ## 🧩 Cloning & Running the Project
 
-### 1. Clone the repository
+### Clone the repository
 
 ```bash
-git clone https://github.com/ShunitTruzman/social-listening-agent.git
-cd social-listening-agent
+git clone https://github.com/ShunitTruzman/langgraph-sql-qa-agent.git
+cd langgraph-sql-qa-agent
 ```
 
 ✔ Important: You **must be inside the project folder** to run the scripts.
@@ -92,7 +92,6 @@ pip install -r requirements.txt
 ```bash
 export OPENAI_API_KEY="your_openai_key"
 export OPENAI_MODEL="gpt-4o-mini"
-export YOUTUBE_API_KEY="your_youtube_key"  # only for YouTube pipeline
 ```
 
 ### Windows (CMD Terminal)
@@ -100,23 +99,27 @@ export YOUTUBE_API_KEY="your_youtube_key"  # only for YouTube pipeline
 ```cmd
 set OPENAI_API_KEY=your_openai_key
 set OPENAI_MODEL=gpt-4o-mini
-set YOUTUBE_API_KEY=your_youtube_key    # only for YouTube pipeline
 ```
 
 The scripts read them using `os.getenv()`.
 
 ---
+## ▶️ Running the Project
 
-## ▶️ Running the Pipelines
-
-### 1️⃣ Reddit + Hacker News
 
 ```bash
-cd agent_reddit_hacker
-python run_reddit_hacker.py
+
+python qa_agent.py
 ```
 ---
-# 5. 📊 Example Queries and Outputs
+## 🧪 Running Tests
+
+```bash
+
+python unit_tests.py
+```
+---
+#  📊 Example Queries and Outputs
 
 ### Example 1 – Join Query
 
@@ -164,7 +167,7 @@ The average grade is 90.5.
 
 ---
 
-# 6. 🔍 Execution Traces Demonstrating the System Flow
+# 🔍 Execution Traces Demonstrating the System Flow
 
 ## Successful Flow
 
@@ -190,14 +193,4 @@ Retry triggered
 
 ---
 
-## 🧪 Running Tests
-
-pytest
-
----
-
-## ▶️ Running the Project
-
-pip install -r requirements.txt  
-python langgraph_university_qa_Cloude2.py
 
