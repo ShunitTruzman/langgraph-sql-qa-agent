@@ -148,7 +148,6 @@ def _parse_json(text: str) -> Dict:
 
 
 # ── Graph builder ──────────────────────────────────────────────────────────────
-
 def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentConfig] = None, get_schema_text: Optional[Callable[[Any], str]] = None):
 
     """
