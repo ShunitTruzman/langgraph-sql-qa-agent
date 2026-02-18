@@ -13,7 +13,7 @@ The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer
 
-............................................................└───── retry (on error) ──────┘...........................
+                                └─── retry (on error) ─────┘
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.
 This makes the system modular, traceable, and easy to debug.
@@ -133,14 +133,23 @@ Which teacher taught CS101 in Spring 2026 and what was the average grade?
 Generated SQL(example):
 
 SELECT t.name AS teacher_name, AVG(e.grade) AS average_grade
+
 FROM course_offerings co
+
 JOIN courses c ON co.course_id = c.course_id
+
 JOIN teachers t ON co.teacher_id = t.teacher_id
+
 LEFT JOIN enrollments e ON co.offering_id = e.offering_id
+
 WHERE c.code = 'CS101'
+
   AND co.semester = 'Spring'
+
   AND co.year = 2026
+
 GROUP BY t.name
+
 LIMIT 50;
 
 Output:
@@ -162,10 +171,15 @@ SELECT t.name
 FROM course_offerings co
 
 JOIN courses c ON co.course_id = c.course_id
+
 JOIN teachers t ON co.teacher_id = t.teacher_id
+
 WHERE c.code = 'CS101'
+
   AND co.semester = 'Spring'
+
   AND co.year = 2026
+
 LIMIT 50;
 
 Output:
@@ -205,10 +219,14 @@ User Input → LangGraph Nodes → SQL → DB Results → Final Answer
 Below is a real trace example (shortened):
 
 [load_schema] {"chars": 1246}
+
 [attempt] {"n": 1}
+
 [llm_raw] {"raw": "...JSON..."}
+
 [gen_sql] {"sql": "SELECT ... LIMIT 50"}
-[exec_sql] {"rows": 1}
+
+[exec_sql] {"rows": 1} \n
 [answer] {"answer": "Dr. Alice Nguyen taught CS101 in Spring 2026, and the average grade was 90.5."}
 
 ---
