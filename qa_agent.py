@@ -56,7 +56,6 @@ def _trace(state: QAState, node: str, **data) -> None:
 def format_trace(trace: List[Dict]) -> str:
     """
     Convert a list of trace events into a human-readable string.
-    Useful for debugging during interviews or printing to console.
     Format: [timestamp_ms] node_name  \n  {json payload}
     """
     return "\n\n".join(
