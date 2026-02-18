@@ -351,8 +351,8 @@ if __name__ == "__main__":
 
     questions = [
         "Which teacher taught CS101 in Spring 2026 and what was the average grade?",
-        "Who teaches CS101 in Spring 2026?",
-        "What is the average grade in CS101 Spring 2026?",
+        "Who taught CS101 in Spring 2026?",
+        "What was the average grade in CS101 Spring 2026?",
         "How many courses is Maya Patel enrolled in?",
         "Tell me about courses",          # triggers clarify path
         "Which students passed CS201 in Fall 2025 with a grade above 90?",
