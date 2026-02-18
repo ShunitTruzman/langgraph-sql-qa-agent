@@ -12,7 +12,7 @@ This system translates natural language questions into SQL queries, executes the
 The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer
-..................................└──────────── retry (on error) ────────────┘..............
+...............................................└─────────── retry (on error) ─────────┘..............
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.
 This makes the system modular, traceable, and easy to debug.
@@ -29,8 +29,8 @@ This makes the system modular, traceable, and easy to debug.
 - answer – Produces a final natural language response  
 
 The system supports:
-- Retry loop on SQL execution error  
-- Clarification path for ambiguous questions  
+-🔁 Retry loop on SQL execution error  
+-❓ Clarification path for ambiguous questions  
 
 ---
 
@@ -116,27 +116,54 @@ python qa_agent.py
 
 ```bash
 
-python unit_tests.py
+pytest
 ```
 ---
 #  📊 Example Queries and Outputs
+Below are real examples from a run of the system.
+For each question, we show: Input → Generated SQL → Final Answer.
 
-### Example 1 – Join Query
+### Example 1 – Multi-step Query (Join + Aggregation)
+
+Input:
+
+Which teacher taught CS101 in Spring 2026 and what was the average grade?
+
+Generated SQL(example):
+
+SELECT t.name AS teacher_name, AVG(e.grade) AS average_grade
+FROM course_offerings co
+JOIN courses c ON co.course_id = c.course_id
+JOIN teachers t ON co.teacher_id = t.teacher_id
+LEFT JOIN enrollments e ON co.offering_id = e.offering_id
+WHERE c.code = 'CS101'
+  AND co.semester = 'Spring'
+  AND co.year = 2026
+GROUP BY t.name
+LIMIT 50;
+
+Output:
+
+Dr. Alice Nguyen taught CS101 in Spring 2026, and the average grade was 90.5.
+
+---
+
+### Example 2 – Join Query
 
 Input:
 
 Who taught CS101 in Spring 2026?
 
-Generated SQL:
+Generated SQL(example):
 
 SELECT t.name
-FROM teachers t
-JOIN course_offerings o ON t.id = o.teacher_id
-JOIN courses c ON o.course_id = c.id
+FROM course_offerings co
+JOIN courses c ON co.course_id = c.course_id
+JOIN teachers t ON co.teacher_id = t.teacher_id
 WHERE c.code = 'CS101'
-AND o.semester = 'Spring'
-AND o.year = 2026
-LIMIT 10;
+  AND co.semester = 'Spring'
+  AND co.year = 2026
+LIMIT 50;
 
 Output:
 
@@ -144,52 +171,42 @@ Dr. Alice Nguyen taught CS101 in Spring 2026.
 
 ---
 
-### Example 2 – Aggregation
+### Example 3 – Aggregation
 
 Input:
 
-What is the average grade in CS101 in Spring 2026?
+What is the average grade in CS101 Spring 2026?
 
-Generated SQL:
+Generated SQL(example):
 
-SELECT AVG(e.grade)
+SELECT AVG(e.grade) AS average_grade
 FROM enrollments e
-JOIN course_offerings o ON e.offering_id = o.id
-JOIN courses c ON o.course_id = c.id
+JOIN course_offerings co ON e.offering_id = co.offering_id
+JOIN courses c ON co.course_id = c.course_id
 WHERE c.code = 'CS101'
-AND o.semester = 'Spring'
-AND o.year = 2026
-LIMIT 10;
+  AND co.semester = 'Spring'
+  AND co.year = 2026
+LIMIT 50;
 
 Output:
 
-The average grade is 90.5.
+The average grade in CS101 for Spring 2026 is 90.5.
 
 ---
 
 # 🔍 Execution Traces Demonstrating the System Flow
 
-## Successful Flow
+The system records a full trace of the run:
+User Input → LangGraph Nodes → SQL → DB Results → Final Answer
 
-[load_schema] Schema loaded (5 tables)  
-[gen_sql] Generated SQL query  
-[exec_sql] rows=1  
-[answer] "Dr. Alice Nguyen taught CS101 in Spring 2026."
+Below is a real trace example (shortened):
 
----
-
-## Retry Flow (Error Recovery Example)
-
-User: Who taught CS101 in 2026?
-
-[gen_sql] SELECT teacher FROM ...  
-[exec_sql] ERROR: no such column 'teacher'  
-
-Retry triggered  
-
-[gen_sql] SELECT t.name FROM teachers t ...  
-[exec_sql] rows=1  
-[answer] "Dr. Alice Nguyen taught CS101 in 2026."
+[load_schema] {"chars": 1246}
+[attempt] {"n": 1}
+[llm_raw] {"raw": "...JSON..."}
+[gen_sql] {"sql": "SELECT ... LIMIT 50"}
+[exec_sql] {"rows": 1}
+[answer] {"answer": "Dr. Alice Nguyen taught CS101 in Spring 2026, and the average grade was 90.5."}
 
 ---
 
