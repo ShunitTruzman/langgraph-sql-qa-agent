@@ -12,7 +12,7 @@ import os
 import json
 import sqlite3
 import pytest
-from langgraph_university_qa_Cloude2 import (
+from qa_agent import (
     AgentConfig, _parse_json, _schema_text, _sql_prompt,
     build_app, run_question,
 )

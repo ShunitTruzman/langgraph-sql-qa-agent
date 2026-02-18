@@ -149,7 +149,8 @@ def _parse_json(text: str) -> Dict:
 
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
-def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentConfig] = None):
+def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentConfig] = None, get_schema_text: Optional[Callable[[Any], str]] = None):
+
     """
     Compile and return a LangGraph runnable.
 
@@ -166,10 +167,11 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
         config: Optional AgentConfig for tuning retry/row limits.
     """
     cfg = config or AgentConfig()
+    schema_fn = get_schema_text or _schema_text
 
     def load_schema(state: QAState) -> QAState:
         """Node 1 — Discover the DB schema and store it in state for use in prompts."""
-        state["schema"] = _schema_text(conn)
+        state["schema"] = schema_fn(conn)
         _trace(state, "load_schema", chars=len(state["schema"]))
         return state
 
@@ -306,7 +308,7 @@ def run_question(*, conn, llm, question: str,
         trace  (List[Dict])   — full execution trace for debugging
         state  (QAState)      — complete final state (includes SQL, rows, etc.)
     """
-    app = build_app(conn=conn, llm=llm, config=config)
+    app = build_app(conn=conn, llm=llm, config=config, get_schema_text=_schema_text)
     state: QAState = {"question": question, "trace": [], "attempts": 0}
     out = app.invoke(state)
     return out.get("answer", ""), out.get("trace", []), out
@@ -351,7 +353,7 @@ if __name__ == "__main__":
     questions = [
         "Which teacher taught CS101 in Spring 2026 and what was the average grade?",
         "Who taught CS101 in Spring 2026?",
-        "What was the average grade in CS101 Spring 2026?",
+        "What is the average grade in CS101 Spring 2026?",
         "How many courses is Maya Patel enrolled in?",
         "Tell me about courses",          # triggers clarify path
         "Which students passed CS201 in Fall 2025 with a grade above 90?",
