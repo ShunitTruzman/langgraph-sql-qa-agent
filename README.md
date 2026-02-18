@@ -1,7 +1,7 @@
 
 # 🎓 LangGraph SQL QA Agent
 
-A LangGraph-based Natural Language to SQL (NL2SQL) agent that answers questions over a University relational database.
+A LangGraph-based Natural Language to SQL agent that answers questions over a University relational database.
 
 ---
 
@@ -54,6 +54,68 @@ The schema supports:
 
 ---
 
+## 🧩 Cloning & Running the Project
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/ShunitTruzman/social-listening-agent.git
+cd social-listening-agent
+```
+
+✔ Important: You **must be inside the project folder** to run the scripts.
+
+---
+
+## ⚙️ Setup
+
+### 1. Create a virtual environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate      # macOS / Linux
+# .\.venv\Scripts\Activate.ps1  # Windows PowerShell
+```
+
+### 2. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 🔑 Environment Variables
+
+### macOS / Linux
+
+```bash
+export OPENAI_API_KEY="your_openai_key"
+export OPENAI_MODEL="gpt-4o-mini"
+export YOUTUBE_API_KEY="your_youtube_key"  # only for YouTube pipeline
+```
+
+### Windows (CMD Terminal)
+
+```cmd
+set OPENAI_API_KEY=your_openai_key
+set OPENAI_MODEL=gpt-4o-mini
+set YOUTUBE_API_KEY=your_youtube_key    # only for YouTube pipeline
+```
+
+The scripts read them using `os.getenv()`.
+
+---
+
+## ▶️ Running the Pipelines
+
+### 1️⃣ Reddit + Hacker News
+
+```bash
+cd agent_reddit_hacker
+python run_reddit_hacker.py
+```
+---
 # 5. 📊 Example Queries and Outputs
 
 ### Example 1 – Join Query
@@ -138,17 +200,4 @@ pytest
 
 pip install -r requirements.txt  
 python langgraph_university_qa_Cloude2.py
-
----
-
-## 🏭 Production Considerations (Summary)
-
-- Add connection pooling  
-- Add LLM retry with exponential backoff  
-- Enforce SELECT-only at DB user level  
-- Use structured JSON logging  
-- Monitor SQL error rate and LLM latency  
-- Containerize with Docker  
-- Add CI pipeline (pytest)  
-- Optionally replace custom tracing with LangSmith  
 
