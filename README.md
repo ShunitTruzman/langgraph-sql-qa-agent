@@ -12,6 +12,7 @@ This system translates natural language questions into SQL queries, executes the
 The execution flow is:
 
 User question → load schema → generate SQL (LLM) → execute SQL → answer (LLM) → Final Answer
+
 ............................................................└───── retry (on error) ──────┘...........................
 
 The flow is implemented as a LangGraph state machine, where each step is a dedicated node.
@@ -157,7 +158,9 @@ Who taught CS101 in Spring 2026?
 Generated SQL(example):
 
 SELECT t.name
+
 FROM course_offerings co
+
 JOIN courses c ON co.course_id = c.course_id
 JOIN teachers t ON co.teacher_id = t.teacher_id
 WHERE c.code = 'CS101'
