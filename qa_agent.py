@@ -1,20 +1,28 @@
 """
-LangGraph QA Agent over a SQL university database.
+LangGraph QA Agent over a SQL e-commerce database.
 
 Flow: NL question → load schema → generate SQL (LLM) → execute SQL → generate answer (LLM)
 If SQL execution fails, the agent retries up to `max_attempts` times, passing the error
 back to the LLM so it can self-correct.
 
+If the question is ambiguous, the agent pauses (LangGraph `interrupt`) and asks the user
+a clarifying question. The user's reply is folded back into the question and the agent
+resumes — a true human-in-the-loop loop, bounded by `max_clarifications`.
+
 DB-agnostic: all schema knowledge is discovered at runtime via introspection (_schema_text).
+Structured output: SQL generation uses the LLM's JSON-schema structured-output mode, so the
+decision is guaranteed to be valid JSON matching a fixed schema (no fragile prompt-only JSON).
 Tracing: every node appends a timestamped event to state["trace"] for full observability.
 """
 
 from __future__ import annotations
 import os
-import json, sqlite3, time, textwrap
+import json, sqlite3, time, textwrap, uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+from langgraph.checkpoint.memory import MemorySaver
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -27,18 +35,48 @@ class QAState(TypedDict, total=False):
     Shared state passed between every LangGraph node.
     Each node reads what it needs and writes its outputs back into this dict.
     """
-    question: str               # The original user question (never mutated)
+    question: str               # The original user question (augmented on clarification)
     schema: str                 # DB schema text injected into LLM prompts
     decision: str               # "sql" → run a query | "clarify" → ask user for more info
     clarification_question: str # Question to ask the user when decision == "clarify"
     sql: str                    # Generated SQL SELECT statement
-    sql_params: Dict[str, Any]  # Optional named parameters for the SQL query
-    attempts: int               # Number of SQL generation attempts so far
+    attempts: int               # Number of SQL generation attempts so far (retry budget)
+    clarifications: int         # Number of clarification rounds so far (clarify budget)
     last_error: str             # Most recent error message (empty string = no error)
     columns: List[str]          # Column names returned by the SQL query
     rows: List[List[Any]]       # Row data returned by the SQL query
     answer: str                 # Final human-readable answer shown to the user
     trace: List[Dict]           # Ordered list of trace events for observability
+
+
+# ── Structured-output schema ────────────────────────────────────────────────────
+# The LLM must return JSON matching this exact schema when generating SQL.
+# Using strict structured outputs means the response is *guaranteed* to be valid
+# JSON in this shape — no markdown fences, no prose, no parsing guesswork.
+SQL_DECISION_SCHEMA: Dict[str, Any] = {
+    "name": "sql_decision",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["sql", "clarify"],
+                "description": "'sql' to run a query, 'clarify' to ask the user for more info.",
+            },
+            "sql": {
+                "type": ["string", "null"],
+                "description": "A single SQL SELECT query when type=='sql', otherwise null.",
+            },
+            "question": {
+                "type": ["string", "null"],
+                "description": "A clarifying question when type=='clarify', otherwise null.",
+            },
+        },
+        "required": ["type", "sql", "question"],
+        "additionalProperties": False,
+    },
+}
 
 
 # ── Tracing ────────────────────────────────────────────────────────────────────
@@ -70,12 +108,15 @@ def format_trace(trace: List[Dict]) -> str:
 class AgentConfig:
     """
     Immutable runtime configuration for the agent.
-    - max_attempts: how many times the agent may retry SQL generation after an error
-                    (e.g. 2 = 1 initial attempt + 1 repair attempt)
-    - max_rows:     safety cap appended as LIMIT if the LLM omits one
+    - max_attempts:       how many times the agent may retry SQL generation after an error
+                          (e.g. 2 = 1 initial attempt + 1 repair attempt)
+    - max_rows:           safety cap appended as LIMIT if the LLM omits one
+    - max_clarifications: how many clarification rounds are allowed before the agent
+                          stops asking and answers with its best effort
     """
     max_attempts: int = 2
     max_rows: int = 50
+    max_clarifications: int = 2
 
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
@@ -85,18 +126,17 @@ def _sql_prompt(question: str, schema: str, last_error: str = "") -> str:
     Build the prompt sent to the LLM for SQL generation.
     - Injects the live DB schema so the LLM only references real tables/columns.
     - If last_error is set (retry path), appends the error so the LLM can self-correct.
-    - Instructs the LLM to return STRICT JSON (no mark down) with either:
-        {"type":"sql","sql":"...","params":{}}   — a runnable SELECT query
-        {"type":"clarify","question":"..."}      — a clarification request
+    - The response *shape* is enforced by SQL_DECISION_SCHEMA (structured output),
+      so the prompt only needs to describe intent, not formatting.
     """
     repair = f"\nPrevious SQL failed: {last_error}\nFix it.\n" if last_error else ""
     return textwrap.dedent(f"""
 You are a careful data assistant. Convert the user question into a single SQL SELECT query.
 Rules:
 - Use ONLY tables/columns in the schema. Prefer explicit JOINs.
-- If the question is ambiguous, ask for clarification instead of guessing.
-- Return STRICT JSON only (no markdown):
-  {{"type":"sql","sql":"...","params":{{}}}}  or  {{"type":"clarify","question":"..."}}
+- If the question is ambiguous, ask for clarification instead of guessing
+  (set type="clarify" and put your question in the "question" field).
+- When you can answer, set type="sql" and put the query in the "sql" field.
 Schema:
 {schema}
 User question: {question}{repair}
@@ -133,8 +173,9 @@ def _schema_text(conn: sqlite3.Connection) -> str:
 def _parse_json(text: str) -> Dict:
     """
     Robustly parse JSON from LLM output.
-    First tries a direct parse; if that fails, extracts the first {...} block
-    to handle cases where the LLM wraps JSON in markdown or adds extra text.
+    With structured outputs the response is already guaranteed valid JSON, so the
+    direct parse path is the norm. The fallback (extract first {...} block) keeps
+    the agent working with LLM backends that don't support structured outputs.
     Raises if no valid JSON object can be found.
     """
     s = text.strip()
@@ -148,22 +189,26 @@ def _parse_json(text: str) -> Dict:
 
 
 # ── Graph builder ──────────────────────────────────────────────────────────────
-def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentConfig] = None, get_schema_text: Optional[Callable[[Any], str]] = None):
-
+def build_app(*, conn: Any, llm: Callable[..., str], config: Optional[AgentConfig] = None,
+              get_schema_text: Optional[Callable[[Any], str]] = None,
+              checkpointer: Optional[Any] = None):
     """
     Compile and return a LangGraph runnable.
 
     Graph topology:
-        START → load_schema → attempt → gen_sql → exec_sql
-                                  ↑                   |
-                                  └── (retry) ────────┘
-                                                      |
-                                               (no_retry) → answer → END
+        START → load_schema → attempt → gen_sql ──(sql)──▶ exec_sql ──(no_retry)──▶ answer → END
+                                  ▲          │                  │
+                          (retry on error)   └──(clarify)──▶ clarify ──(resume)──┐
+                                  │                                              │
+                                  └────────────────────────────────────── loop back to gen_sql
 
     Args:
-        conn:   Any DB connection with a .cursor() interface (SQLite used here).
-        llm:    Callable (prompt: str) -> str. Swap this to change the LLM provider.
-        config: Optional AgentConfig for tuning retry/row limits.
+        conn:            Any DB connection with a .cursor() interface (SQLite used here).
+        llm:             Callable (prompt, *, response_schema=None) -> str. Swap to change provider.
+        config:          Optional AgentConfig for tuning retry/row/clarify limits.
+        get_schema_text: Optional schema-introspection override.
+        checkpointer:    LangGraph checkpointer (defaults to in-memory). Required for the
+                         human-in-the-loop `interrupt`/resume to work.
     """
     cfg = config or AgentConfig()
     schema_fn = get_schema_text or _schema_text
@@ -178,39 +223,58 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
         """
         Node 2 — Ask the LLM to generate SQL (or request clarification).
         - Builds the prompt with the current schema and any previous error (retry path).
-        - Parses the LLM's JSON response.
+        - Calls the LLM with a structured-output schema → guaranteed-valid JSON.
         - Validates that the query is a SELECT (rejects writes for safety).
         - Appends LIMIT if the LLM omitted it.
         - Sets state["decision"] = "sql" or "clarify" for downstream routing.
         """
-        raw = llm(_sql_prompt(state["question"], state["schema"], state.get("last_error", "")))
+        raw = llm(
+            _sql_prompt(state["question"], state["schema"], state.get("last_error", "")),
+            response_schema=SQL_DECISION_SCHEMA,
+        )
         _trace(state, "llm_raw", raw=raw)
 
         try:
             obj = _parse_json(raw)
         except Exception as e:
-            # LLM returned unparseable output — mark as error so retry loop triggers
-            state.update(decision="sql", sql="", sql_params={}, last_error=f"Invalid JSON: {e}")
+            # Unparseable output — mark as error so the retry loop triggers.
+            state.update(decision="sql", sql="", last_error=f"Invalid JSON: {e}")
             return state
 
         if obj.get("type") == "clarify":
-            # LLM decided the question is too ambiguous to answer — ask the user
+            # The question is too ambiguous to answer — ask the user.
             state.update(decision="clarify",
-                         clarification_question=obj.get("question", "Can you clarify?"))
+                         clarification_question=obj.get("question") or "Can you clarify?")
             return state
 
-        sql = obj.get("sql", "").strip().rstrip(";")
+        sql = (obj.get("sql") or "").strip().rstrip(";")
         if not sql.lower().startswith("select"):
             # Reject any non-SELECT query for security (no INSERT/UPDATE/DROP etc.)
-            state.update(decision="sql", sql="", sql_params={}, last_error="Only SELECT allowed.")
+            state.update(decision="sql", sql="", last_error="Only SELECT allowed.")
             return state
 
         if " limit " not in sql.lower():
             sql += f" LIMIT {cfg.max_rows}"  # Prevent runaway large result sets
 
-        state.update(decision="sql", sql=sql,
-                     sql_params=obj.get("params") or {}, last_error="")
+        state.update(decision="sql", sql=sql, last_error="")
         _trace(state, "gen_sql", sql=sql)
+        return state
+
+    def clarify(state: QAState) -> QAState:
+        """
+        Node 2b (human-in-the-loop) — Pause the graph and ask the user to clarify.
+
+        `interrupt(...)` suspends execution and surfaces the clarification question to
+        the caller. When the caller resumes with the user's reply (Command(resume=...)),
+        the node re-runs and `interrupt(...)` returns that reply. We fold the reply into
+        the question and loop back to gen_sql to try again — bounded by max_clarifications.
+        """
+        reply = interrupt({"clarification_question": state.get("clarification_question", "Can you clarify?")})
+        state["clarifications"] = state.get("clarifications", 0) + 1
+        state["question"] = f'{state["question"]}\n\nAdditional context from user: {reply}'
+        state["decision"] = ""
+        state["clarification_question"] = ""
+        _trace(state, "clarify", reply=reply, n=state["clarifications"])
         return state
 
     def exec_sql(state: QAState) -> QAState:
@@ -220,13 +284,13 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
         - On failure: stores the error message in last_error so the retry loop
           can pass it back to the LLM for self-correction.
         """
-        sql, params = state.get("sql", ""), state.get("sql_params") or {}
+        sql = state.get("sql", "")
         if not sql:
             state["last_error"] = state.get("last_error") or "No SQL produced."
             return state
         cur = conn.cursor()
         try:
-            cur.execute(sql, params) if params else cur.execute(sql)
+            cur.execute(sql)
             state["rows"] = [list(r) for r in cur.fetchall()]
             state["columns"] = [d[0] for d in (cur.description or [])]
             state["last_error"] = ""
@@ -242,7 +306,7 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
         """
         Node 4 (terminal) — Produce the final answer shown to the user.
         Three cases:
-          1. decision == "clarify": return the clarification question as the answer.
+          1. decision == "clarify" (clarify budget exhausted): return the pending question.
           2. last_error is set (retries exhausted): return a debug-friendly error message.
           3. Normal path: ask the LLM to summarize the SQL results in plain English.
         """
@@ -261,12 +325,26 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
 
     def inc_attempts(state: QAState) -> QAState:
         """
-        Node 5 — Increment the attempt counter before each SQL generation call.
-        Checked by should_retry() to enforce the max_attempts limit.
+        Node 5 — Increment the SQL-attempt counter before each generation call on the
+        initial/retry path. Clarification loops bypass this node, so they don't consume
+        the SQL retry budget.
         """
         state["attempts"] = state.get("attempts", 0) + 1
         _trace(state, "attempt", n=state["attempts"])
         return state
+
+    def route_after_gen(state: QAState) -> str:
+        """
+        Conditional edge after gen_sql.
+        - "clarify"  → pause for the user (while clarify budget remains)
+        - "answer"   → clarify budget exhausted; answer with the pending question
+        - "exec_sql" → run the generated SQL
+        """
+        if state.get("decision") == "clarify":
+            if state.get("clarifications", 0) < cfg.max_clarifications:
+                return "clarify"
+            return "answer"
+        return "exec_sql"
 
     def should_retry(state: QAState) -> str:
         """
@@ -283,33 +361,61 @@ def build_app(*, conn: Any, llm: Callable[[str], str], config: Optional[AgentCon
     # Wire up the graph nodes and edges
     g = StateGraph(QAState)
     for name, fn in [("load_schema", load_schema), ("attempt", inc_attempts),
-                     ("gen_sql", gen_sql), ("exec_sql", exec_sql), ("answer", answer)]:
+                     ("gen_sql", gen_sql), ("clarify", clarify),
+                     ("exec_sql", exec_sql), ("answer", answer)]:
         g.add_node(name, fn)
 
     g.add_edge(START, "load_schema")
     g.add_edge("load_schema", "attempt")
     g.add_edge("attempt", "gen_sql")
-    g.add_edge("gen_sql", "exec_sql")
+    g.add_conditional_edges("gen_sql", route_after_gen,
+                            {"clarify": "clarify", "exec_sql": "exec_sql", "answer": "answer"})
+    g.add_edge("clarify", "gen_sql")
     g.add_conditional_edges("exec_sql", should_retry, {"retry": "attempt", "no_retry": "answer"})
     g.add_edge("answer", END)
-    return g.compile()
+    return g.compile(checkpointer=checkpointer or MemorySaver())
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def run_question(*, conn, llm, question: str,
-                 config: Optional[AgentConfig] = None) -> Tuple[str, List, QAState]:
+                 config: Optional[AgentConfig] = None,
+                 on_clarify: Optional[Callable[[str], str]] = None,
+                 thread_id: Optional[str] = None) -> Tuple[str, List, QAState]:
     """
     Convenience wrapper: build the app, run one question, return results.
 
+    Human-in-the-loop:
+        If `on_clarify` is provided, it is called with the clarification question and must
+        return the user's reply (str); the agent then resumes automatically. In a CLI you
+        can pass `on_clarify=input`. If `on_clarify` is None, the agent does not block —
+        it returns the clarification question as the answer (single-shot behavior).
+
     Returns:
-        answer (str)          — final human-readable answer
+        answer (str)          — final human-readable answer (or clarification question)
         trace  (List[Dict])   — full execution trace for debugging
         state  (QAState)      — complete final state (includes SQL, rows, etc.)
     """
     app = build_app(conn=conn, llm=llm, config=config, get_schema_text=_schema_text)
-    state: QAState = {"question": question, "trace": [], "attempts": 0}
-    out = app.invoke(state)
+    run_config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
+    state: QAState = {"question": question, "trace": [], "attempts": 0, "clarifications": 0}
+
+    out = app.invoke(state, config=run_config)
+
+    # Drive the human-in-the-loop clarification loop, if the graph paused.
+    while "__interrupt__" in out:
+        intr = out["__interrupt__"][0]
+        payload = getattr(intr, "value", intr)
+        clar_q = payload.get("clarification_question", "Can you clarify?") \
+            if isinstance(payload, dict) else str(payload)
+
+        if on_clarify is None:
+            # Non-interactive: surface the question instead of blocking.
+            return clar_q, out.get("trace", []), out
+
+        reply = on_clarify(clar_q)
+        out = app.invoke(Command(resume=reply), config=run_config)
+
     return out.get("answer", ""), out.get("trace", []), out
 
 def load_sql_file(sql_path: str, *, sqlite_path: str = ":memory:") -> sqlite3.Connection:
@@ -324,18 +430,25 @@ def load_sql_file(sql_path: str, *, sqlite_path: str = ":memory:") -> sqlite3.Co
         conn.executescript(f.read())
     return conn
 
-def make_openai_llm(model: str = "gpt-4o-mini") -> Callable[[str], str]:
+def make_openai_llm(model: str = "gpt-4o-mini") -> Callable[..., str]:
     """
-    Returns a Callable[[str], str] backed by OpenAI.
+    Returns a Callable (prompt, *, response_schema=None) -> str backed by OpenAI.
     Reads OPENAI_API_KEY from .env via load_dotenv().
     temperature=0 → deterministic SQL generation (no creativity, just accuracy).
+
+    When `response_schema` is provided, OpenAI Structured Outputs are used, guaranteeing
+    the returned content is valid JSON conforming to that schema.
     """
     client = OpenAI()
-    def llm(prompt: str) -> str:
+    def llm(prompt: str, *, response_schema: Optional[Dict[str, Any]] = None) -> str:
+        kwargs: Dict[str, Any] = {}
+        if response_schema is not None:
+            kwargs["response_format"] = {"type": "json_schema", "json_schema": response_schema}
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
+            **kwargs,
         )
         return response.choices[0].message.content
     return llm
@@ -344,24 +457,25 @@ def make_openai_llm(model: str = "gpt-4o-mini") -> Callable[[str], str]:
 if __name__ == "__main__":
     conn = load_sql_file(
         os.path.join(os.path.dirname(__file__),
-                     "university_schema_and_seed.sql")
+                     "ecommerce_schema_and_seed.sql")
     )
 
     llm = make_openai_llm(model="gpt-4o-mini")
 
     questions = [
-        "Which teacher taught CS101 in Spring 2026 and what was the average grade?",
-        "Who taught CS101 in Spring 2026?",
-        "What is the average grade in CS101 Spring 2026?",
-        "How many courses is Maya Patel enrolled in?",
-        "Tell me about courses",          # triggers clarify path
-        "Which students passed CS201 in Fall 2025 with a grade above 90?",
+        "How many orders has Alice Cohen placed?",
+        "What is the total revenue from delivered orders?",
+        "Which 3 products generated the most revenue?",
+        "What is the average price of products in the Electronics category?",
+        "Tell me about products",          # triggers clarify path (interactive)
+        "List customers from Israel and how much each has spent.",
     ]
 
     for q in questions:
         print(f"\n{'='*60}")
         print(f"Q: {q}")
-        ans, trace, _ = run_question(conn=conn, llm=llm, question=q)
+        # In the CLI, answer clarification prompts interactively via input().
+        ans, trace, _ = run_question(conn=conn, llm=llm, question=q, on_clarify=input)
         print(f"A: {ans}")
         print("\n--- TRACE ---")
         print(format_trace(trace))
