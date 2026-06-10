@@ -1,7 +1,7 @@
 
 # 🛒 LangGraph SQL QA Agent
 
-A LangGraph-based Natural Language to SQL agent that answers questions over an E-commerce relational database.
+A LangGraph-based Natural Language to SQL agent that answers questions over an E-commerce relational database, with optional retrieval (RAG) over the schema.
 
 ---
 
@@ -54,6 +54,29 @@ LangGraph checkpointer (`MemorySaver` by default).
 
 In code, pass an `on_clarify` callback to `run_question` (use `on_clarify=input` for a CLI). If no
 callback is given, the agent stays single-shot and simply returns the clarification question.
+
+### Schema retrieval (RAG)
+
+For large databases, dumping every table's DDL into the prompt is wasteful and noisy. Pass an
+embedder (`embed=`) to enable **RAG over the schema**: each table's DDL is embedded once, and per
+question the agent retrieves only the most relevant tables (cosine similarity), then **expands the
+set along foreign keys** so multi-table JOINs still work. Without an embedder it falls back to the
+full schema.
+
+```python
+from qa_agent import run_question, make_openai_llm, make_openai_embedder
+
+answer, trace, _ = run_question(
+    conn=conn,
+    llm=make_openai_llm(),
+    embed=make_openai_embedder(),   # enables schema retrieval
+    question="Which customers from Israel spent the most?",
+)
+```
+
+This makes the project a demonstration of **both** text-to-SQL *and* retrieval (RAG). On the tiny
+demo schema (5 tables) the benefit is illustrative; the technique matters on schemas with dozens or
+hundreds of tables, where it keeps the prompt small and focused.
 
 ---
 
@@ -138,8 +161,8 @@ python qa_agent.py
 ---
 ## 🧪 Running Tests
 
-The suite (19 tests) covers DB joins, SQL generation, the retry loop, structured-output
-wiring, and the full human-in-the-loop clarify → resume flow. Tests use a fake LLM, so
+The suite (23 tests) covers DB joins, SQL generation, the retry loop, structured-output
+wiring, the full human-in-the-loop clarify → resume flow, and schema retrieval (RAG). Tests use a fake LLM, so
 **no API key is required** to run them.
 
 ```bash

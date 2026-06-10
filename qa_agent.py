@@ -26,6 +26,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from schema_retrieval import SchemaIndex
+
 load_dotenv()
 
 # ── Types ──────────────────────────────────────────────────────────────────────
@@ -113,10 +115,13 @@ class AgentConfig:
     - max_rows:           safety cap appended as LIMIT if the LLM omits one
     - max_clarifications: how many clarification rounds are allowed before the agent
                           stops asking and answers with its best effort
+    - schema_top_k:       when schema retrieval (RAG) is enabled, how many tables to retrieve
+                          for the question before foreign-key expansion
     """
     max_attempts: int = 2
     max_rows: int = 50
     max_clarifications: int = 2
+    schema_top_k: int = 3  # when schema-RAG is enabled, how many tables to retrieve
 
 
 # ── Prompts ────────────────────────────────────────────────────────────────────
@@ -191,9 +196,15 @@ def _parse_json(text: str) -> Dict:
 # ── Graph builder ──────────────────────────────────────────────────────────────
 def build_app(*, conn: Any, llm: Callable[..., str], config: Optional[AgentConfig] = None,
               get_schema_text: Optional[Callable[[Any], str]] = None,
+              embed: Optional[Callable[[List[str]], List[List[float]]]] = None,
               checkpointer: Optional[Any] = None):
     """
     Compile and return a LangGraph runnable.
+
+    Schema handling:
+        If `embed` is provided, the agent uses **schema RAG**: it embeds each table's DDL once
+        and, per question, retrieves only the most relevant tables (then expands along foreign
+        keys). If `embed` is None, it falls back to dumping the full schema (original behavior).
 
     Graph topology:
         START → load_schema → attempt → gen_sql ──(sql)──▶ exec_sql ──(no_retry)──▶ answer → END
@@ -205,18 +216,29 @@ def build_app(*, conn: Any, llm: Callable[..., str], config: Optional[AgentConfi
     Args:
         conn:            Any DB connection with a .cursor() interface (SQLite used here).
         llm:             Callable (prompt, *, response_schema=None) -> str. Swap to change provider.
-        config:          Optional AgentConfig for tuning retry/row/clarify limits.
-        get_schema_text: Optional schema-introspection override.
+        config:          Optional AgentConfig for tuning retry/row/clarify/retrieval limits.
+        get_schema_text: Optional full-schema introspection override (used when embed is None).
+        embed:           Optional embedder Callable[[List[str]], List[List[float]]]; enables schema RAG.
         checkpointer:    LangGraph checkpointer (defaults to in-memory). Required for the
                          human-in-the-loop `interrupt`/resume to work.
     """
     cfg = config or AgentConfig()
     schema_fn = get_schema_text or _schema_text
+    schema_index = SchemaIndex.build(conn, embed) if embed is not None else None
 
     def load_schema(state: QAState) -> QAState:
-        """Node 1 — Discover the DB schema and store it in state for use in prompts."""
-        state["schema"] = schema_fn(conn)
-        _trace(state, "load_schema", chars=len(state["schema"]))
+        """Node 1 — Make the schema available to the prompt.
+
+        With an embedder, retrieve only the tables relevant to the question (schema RAG);
+        otherwise dump the full schema.
+        """
+        if schema_index is not None:
+            state["schema"] = schema_index.retrieve(state["question"], embed, top_k=cfg.schema_top_k)
+            _trace(state, "load_schema", chars=len(state["schema"]), mode="retrieval",
+                   top_k=cfg.schema_top_k)
+        else:
+            state["schema"] = schema_fn(conn)
+            _trace(state, "load_schema", chars=len(state["schema"]), mode="full")
         return state
 
     def gen_sql(state: QAState) -> QAState:
@@ -381,9 +403,14 @@ def build_app(*, conn: Any, llm: Callable[..., str], config: Optional[AgentConfi
 def run_question(*, conn, llm, question: str,
                  config: Optional[AgentConfig] = None,
                  on_clarify: Optional[Callable[[str], str]] = None,
+                 embed: Optional[Callable[[List[str]], List[List[float]]]] = None,
                  thread_id: Optional[str] = None) -> Tuple[str, List, QAState]:
     """
     Convenience wrapper: build the app, run one question, return results.
+
+    Schema RAG:
+        Pass `embed` to enable schema retrieval (only relevant tables go into the prompt).
+        Omit it to use the full schema.
 
     Human-in-the-loop:
         If `on_clarify` is provided, it is called with the clarification question and must
@@ -396,7 +423,7 @@ def run_question(*, conn, llm, question: str,
         trace  (List[Dict])   — full execution trace for debugging
         state  (QAState)      — complete final state (includes SQL, rows, etc.)
     """
-    app = build_app(conn=conn, llm=llm, config=config, get_schema_text=_schema_text)
+    app = build_app(conn=conn, llm=llm, config=config, get_schema_text=_schema_text, embed=embed)
     run_config = {"configurable": {"thread_id": thread_id or str(uuid.uuid4())}}
     state: QAState = {"question": question, "trace": [], "attempts": 0, "clarifications": 0}
 
@@ -454,6 +481,18 @@ def make_openai_llm(model: str = "gpt-4o-mini") -> Callable[..., str]:
     return llm
 
 
+def make_openai_embedder(model: str = "text-embedding-3-small") -> Callable[[List[str]], List[List[float]]]:
+    """
+    Returns an embedder Callable[[List[str]], List[List[float]]] backed by OpenAI.
+    Pass it to build_app/run_question to enable schema retrieval (RAG over the schema).
+    """
+    client = OpenAI()
+    def embed(texts: List[str]) -> List[List[float]]:
+        resp = client.embeddings.create(model=model, input=texts)
+        return [d.embedding for d in resp.data]
+    return embed
+
+
 if __name__ == "__main__":
     conn = load_sql_file(
         os.path.join(os.path.dirname(__file__),
@@ -461,6 +500,7 @@ if __name__ == "__main__":
     )
 
     llm = make_openai_llm(model="gpt-4o-mini")
+    embed = make_openai_embedder()  # enables schema RAG (retrieve relevant tables per question)
 
     questions = [
         "How many orders has Alice Cohen placed?",
@@ -475,7 +515,7 @@ if __name__ == "__main__":
         print(f"\n{'='*60}")
         print(f"Q: {q}")
         # In the CLI, answer clarification prompts interactively via input().
-        ans, trace, _ = run_question(conn=conn, llm=llm, question=q, on_clarify=input)
+        ans, trace, _ = run_question(conn=conn, llm=llm, question=q, on_clarify=input, embed=embed)
         print(f"A: {ans}")
         print("\n--- TRACE ---")
         print(format_trace(trace))

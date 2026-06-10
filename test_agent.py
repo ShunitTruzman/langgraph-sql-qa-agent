@@ -228,3 +228,62 @@ def test_clarify_budget_is_bounded(conn):
     )
     assert calls["n"] == 2                 # asked exactly twice, then gave up
     assert "Still ambiguous?" in ans       # falls back to the pending question
+
+
+# ── 5. Schema RAG (retrieval over the schema) ──────────────────────────────────
+
+from schema_retrieval import SchemaIndex, _cosine
+
+
+def test_cosine_basic():
+    assert _cosine([1.0, 0.0], [1.0, 0.0]) == 1.0
+    assert _cosine([1.0, 0.0], [0.0, 1.0]) == 0.0
+
+
+def test_schema_index_filters_and_expands_by_fk():
+    """retrieve() keeps the top-k tables AND any tables they reference via FK."""
+    tables = {
+        "a": "CREATE TABLE a (id INT);",
+        "b": "CREATE TABLE b (id INT);",
+        "c": "CREATE TABLE c (id INT);",
+        "d": "CREATE TABLE d (id INT);",
+    }
+    vectors = {"a": [1.0, 0.0, 0.0], "b": [0.0, 1.0, 0.0],
+               "c": [0.9, 0.1, 0.0], "d": [0.0, 0.0, 1.0]}
+    fk_map = {"a": [], "b": [], "c": ["b"], "d": []}  # c references b
+    idx = SchemaIndex(tables, vectors, fk_map)
+
+    # query vector closest to a, then c (top_k=2); c pulls in b via FK
+    out = idx.retrieve("q", lambda texts: [[1.0, 0.0, 0.0]], top_k=2)
+    assert "CREATE TABLE a" in out
+    assert "CREATE TABLE c" in out
+    assert "CREATE TABLE b" in out      # included only because c references it
+    assert "CREATE TABLE d" not in out  # irrelevant and unreferenced
+
+
+def test_schema_index_small_schema_returns_all():
+    tables = {"a": "CREATE TABLE a (id INT);", "b": "CREATE TABLE b (id INT);"}
+    idx = SchemaIndex(tables, {"a": [1.0, 0.0], "b": [0.0, 1.0]}, {"a": [], "b": []})
+    out = idx.retrieve("q", lambda texts: [[1.0, 0.0]], top_k=3)  # 2 tables <= 3 → all
+    assert "CREATE TABLE a" in out and "CREATE TABLE b" in out
+
+
+def test_schema_rag_puts_only_relevant_table_in_prompt(conn):
+    """End-to-end: with an embedder, only the relevant table's DDL reaches the LLM prompt."""
+    TABLES = ["customers", "categories", "products", "orders", "order_items"]
+
+    def fake_embed(texts):
+        # deterministic vector: 1.0 where a table name appears in the text
+        return [[1.0 if name in t.lower() else 0.0 for name in TABLES] for t in texts]
+
+    llm = FakeLLM([sql_resp("SELECT name FROM categories")])
+    ans, trace, state = run_question(
+        conn=conn, llm=llm, question="categories",
+        embed=fake_embed, config=AgentConfig(schema_top_k=1),
+    )
+
+    prompt = llm.sql_calls[0]                       # the prompt the model saw
+    assert "CREATE TABLE categories" in prompt      # relevant table retrieved
+    assert "CREATE TABLE customers" not in prompt   # irrelevant table excluded
+    assert any(e["node"] == "load_schema" and e["data"].get("mode") == "retrieval"
+               for e in trace)                      # trace shows retrieval mode
