@@ -1,7 +1,7 @@
 
-# 🛒 LangGraph SQL QA Agent
+# 🛒 LangGraph SQL RAG Agent
 
-A LangGraph-based Natural Language to SQL agent that answers questions over an E-commerce relational database, with optional retrieval (RAG) over the schema.
+A LangGraph-based agent that turns natural-language questions into SQL over a relational database — featuring retrieval (RAG) over the schema, self-correcting queries, and human-in-the-loop clarification.
 
 ---
 
@@ -105,8 +105,8 @@ The schema supports:
 ### Clone the repository
 
 ```bash
-git clone https://github.com/ShunitTruzman/langgraph-sql-qa-agent.git
-cd langgraph-sql-qa-agent
+git clone https://github.com/ShunitTruzman/langgraph-sql-rag-agent.git
+cd langgraph-sql-rag-agent
 ```
 
 ✔ Important: You **must be inside the project folder** to run the scripts.
