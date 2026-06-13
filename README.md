@@ -1,7 +1,6 @@
-
 # 🛒 LangGraph SQL RAG Agent
 
-A LangGraph-based agent that turns natural-language questions into SQL over a relational database — featuring retrieval (RAG) over the schema, self-correcting queries, and human-in-the-loop clarification.
+A LangGraph-based agent that turns natural-language questions into SQL over a relational database — featuring retrieval (RAG) over the schema, self-correcting queries, human-in-the-loop clarification, and full execution tracing via LangSmith for observability and debugging.
 
 ---
 
@@ -78,6 +77,28 @@ This makes the project a demonstration of **both** text-to-SQL *and* retrieval (
 demo schema (5 tables) the benefit is illustrative; the technique matters on schemas with dozens or
 hundreds of tables, where it keeps the prompt small and focused.
 
+### Observability & tracing (LangSmith)
+
+Every run can be traced end-to-end with **LangSmith**, LangChain's observability platform. Because
+the agent is built on LangGraph, basic tracing requires **no code changes** — set the environment
+variables below and each run streams to your LangSmith dashboard, where you can inspect every node
+(`load_schema`, `gen_sql`, `exec_sql`, ...), its inputs and outputs, latency, and the exact order of
+calls, including the retry and clarify loops.
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your_langsmith_key
+LANGSMITH_PROJECT=langgraph-sql-rag-agent   # optional: groups runs in the dashboard
+```
+
+The OpenAI calls inside the custom `llm` / `embed` wrappers can additionally be nested as LLM spans
+(with prompts and token counts) by decorating them with `@traceable` from the `langsmith` package,
+or by wrapping the OpenAI client with `wrap_openai`.
+
+This complements the lightweight built-in `_trace` (shown at the end of this README): the in-process
+trace is handy for quick local debugging and tests, while LangSmith gives full, persistent, visual
+observability.
+
 ---
 
 ## 🗄 Database Schema
@@ -138,17 +159,29 @@ pip install -r requirements.txt
 ```bash
 export OPENAI_API_KEY="your_openai_key"
 export OPENAI_MODEL="gpt-4o-mini"
+
+# Optional — enable LangSmith tracing for observability/debugging
+export LANGSMITH_TRACING="true"
+export LANGSMITH_API_KEY="your_langsmith_key"
+export LANGSMITH_PROJECT="langgraph-sql-rag-agent"
 ```
 
 ### Windows (CMD Terminal)
 
 ```cmd
-set OPENAI_API_KEY=your_openai_key  
+set OPENAI_API_KEY=your_openai_key
 set OPENAI_MODEL=gpt-4o-mini
+
+:: Optional - enable LangSmith tracing for observability/debugging
+set LANGSMITH_TRACING=true
+set LANGSMITH_API_KEY=your_langsmith_key
+set LANGSMITH_PROJECT=langgraph-sql-rag-agent
 ```
 
 The scripts read them using `os.getenv()`. Use a model that supports **Structured Outputs**
-(`gpt-4o-mini` and `gpt-4o` both do).
+(`gpt-4o-mini` and `gpt-4o` both do). The `LANGSMITH_*` variables are optional — set them only if
+you want runs traced to LangSmith. (The older `LANGCHAIN_TRACING_V2` / `LANGCHAIN_API_KEY` /
+`LANGCHAIN_PROJECT` names also work.)
 
 ---
 ## ▶️ Running the Project
@@ -240,5 +273,3 @@ Below is a real trace example (shortened):
 [answer] {"answer": "The total revenue from delivered orders is 476.0."}
 
 ---
-
-
